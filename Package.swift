@@ -7,8 +7,8 @@ let package = Package(
     platforms: [.iOS(.v12)],
     products: [
         .library(
-            name: "CoreCrypto",
-            targets: ["CoreCrypto", "CoreCryptoSwift"]
+            name: "WireCoreCrypto",
+            targets: ["WireCoreCrypto", "CoreCryptoSwift"]
         ),
         .library(
             name: "LibCoreCrypto",
@@ -18,7 +18,7 @@ let package = Package(
     dependencies: [],
     targets: [
         .target(
-            name: "CoreCrypto",
+            name: "WireCoreCrypto",
             dependencies: ["CoreCryptoSwift"]
         ),
         .systemLibrary(
