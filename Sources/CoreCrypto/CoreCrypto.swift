@@ -85,7 +85,7 @@ extension CoreCryptoSwift.MlsRatchetTreeType {
 public typealias ConversationId = [UInt8]
 
 /// Alias for ClientId within a conversation.
-public typealias MemberId = [UInt8]
+public typealias ClientId = [UInt8]
 
 /// Conversation ciphersuite variants
 public enum CiphersuiteName: ConvertToInner {
@@ -129,7 +129,7 @@ public struct ConversationConfiguration: ConvertToInner {
     }
 
     ///  List of client IDs with administrative permissions
-    public var admins: [MemberId]
+    public var admins: [ClientId]
     /// Conversation ciphersuite
     public var ciphersuite: CiphersuiteName?
     /// Duration in seconds after which we will automatically force a self_update commit
@@ -138,7 +138,7 @@ public struct ConversationConfiguration: ConvertToInner {
     /// List of client IDs that are allowed to be external senders of commits
     public var externalSenders: [[UInt8]]
 
-    public init(admins: [MemberId], ciphersuite: CiphersuiteName?, keyRotationSpan: TimeInterval?, externalSenders: [[UInt8]]) {
+    public init(admins: [ClientId], ciphersuite: CiphersuiteName?, keyRotationSpan: TimeInterval?, externalSenders: [[UInt8]]) {
         self.admins = admins
         self.ciphersuite = ciphersuite
         self.keyRotationSpan = keyRotationSpan
@@ -366,6 +366,20 @@ public class CoreCryptoWrapper {
     ///
     public init(path: String, key: String, clientId: String, entropySeed: [UInt8]?) throws {
         self.coreCrypto = try CoreCrypto(path: path, key: key, clientId: clientId, entropySeed: entropySeed)
+    }
+
+    /// Almost identical to ```CoreCrypto/init``` but allows a 2 phase initialization of MLS.First, calling this will
+    /// set up the keystore and will allow generating proteus prekeys.Then, those keys can be traded for a clientId.
+    /// Use this clientId to initialize MLS with ```CoreCrypto/mlsInit```.
+    public static func deferredInit(path: String, key: String, entropySeed: [UInt8]?) throws -> CoreCrypto {
+        try CoreCrypto.deferredInit(path: path, key: key, entropySeed: entropySeed)
+    }
+
+    /// Use this after ```CoreCrypto/deferredInit``` when you have a clientId. It initializes MLS.
+    ///
+    /// - parameter clientId: client identifier
+    public func mlsInit(clientId: String) throws {
+        try self.coreCrypto.mlsInit(clientId: clientId)
     }
 
     /// Sets the callback interface, required by some operations from `CoreCrypto`
@@ -646,6 +660,33 @@ public class CoreCryptoWrapper {
         try self.coreCrypto.commitAccepted(conversationId: conversationId)
     }
 
+    /// Allows to remove a pending (uncommitted) proposal. Use this when backend rejects the proposal
+    /// you just sent e.g. if permissions have changed meanwhile.
+    ///
+    /// **CAUTION**: only use this when you had an explicit response from the Delivery Service
+    /// e.g. 403 or 409. Do not use otherwise e.g. 5xx responses, timeout etc..
+    ///
+    /// - parameter conversation_id - the group/conversation id
+    /// - parameter proposal_ref - unique proposal identifier which is present in MlsProposalBundle and
+    /// returned from all operation creating a proposal
+    public func clearPendingProposal(conversationId: ConversationId, proposalRef: [UInt8]) throws {
+        try self.coreCrypto.clearPendingProposal(conversationId: conversationId, proposalRef: proposalRef)
+
+    }
+
+    /// Allows to remove a pending commit. Use this when backend rejects the commit
+    /// you just sent e.g. if permissions have changed meanwhile.
+    ///
+    /// **CAUTION**: only use this when you had an explicit response from the Delivery Service
+    /// e.g. 403. Do not use otherwise e.g. 5xx responses, timeout etc..
+    /// **DO NOT** use when Delivery Service responds 409, pending state will be renewed
+    /// in [MlsCentral::decrypt_message]
+    ///
+    /// - parameter conversation_id - the group/conversation id
+    public func clearPendingCommit(conversationId: ConversationId) throws {
+        try self.coreCrypto.clearPendingCommit(conversationId: conversationId)
+    }
+
     /// Initiailizes the proteus client
     public func proteusInit() throws {
         try self.coreCrypto.proteusInit()
@@ -732,6 +773,21 @@ public class CoreCryptoWrapper {
     public func proteusFingerprint() throws -> String {
         try self.coreCrypto.proteusFingerprint()
     }
+
+    /// Proteus session local fingerprint
+    ///
+    /// - returns: Hex-encoded public key string
+    public func proteusFingerprintLocal(sessionId: String) throws -> String {
+        try self.coreCrypto.proteusFingerprintLocal(sessionId: sessionId)
+    }
+
+    /// Proteus session remote fingerprint
+    ///
+    /// - returns: Hex-encoded public key string
+    public func proteusFingerprintRemote(sessionId: String) throws -> String {
+        try self.coreCrypto.proteusFingerprintRemote(sessionId: sessionId)
+    }
+
 
      /// Imports all the data stored by Cryptobox into the CoreCrypto keystore
      ///
