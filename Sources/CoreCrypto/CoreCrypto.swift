@@ -125,24 +125,59 @@ private extension CiphersuiteName {
 public struct ConversationConfiguration: ConvertToInner {
     typealias Inner = CoreCryptoSwift.ConversationConfiguration
     func convert() -> Inner {
-        return CoreCryptoSwift.ConversationConfiguration(admins: self.admins, ciphersuite: self.ciphersuite?.convert(), keyRotationSpan: self.keyRotationSpan, externalSenders: self.externalSenders)
+        return CoreCryptoSwift.ConversationConfiguration(ciphersuite: self.ciphersuite?.convert(), externalSenders: self.externalSenders, custom: self.custom.convert())
     }
 
-    ///  List of client IDs with administrative permissions
-    public var admins: [ClientId]
     /// Conversation ciphersuite
     public var ciphersuite: CiphersuiteName?
+    /// List of client IDs that are allowed to be external senders of commits
+    public var externalSenders: [[UInt8]]
+    /// Implementation specific configuration
+    public var custom: CustomConfiguration
+
+    public init(ciphersuite: CiphersuiteName?, externalSenders: [[UInt8]], custom: CustomConfiguration) {
+        self.ciphersuite = ciphersuite
+        self.externalSenders = externalSenders
+        self.custom = custom
+    }
+}
+
+/// Defines if handshake messages are encrypted or not
+public enum WirePolicy: ConvertToInner {
+    typealias Inner = CoreCryptoSwift.MlsWirePolicy
+
+    case plaintext
+    case ciphertext
+}
+
+private extension WirePolicy {
+    func convert() -> Inner {
+        switch self {
+        case .plaintext:
+            return CoreCryptoSwift.MlsWirePolicy.plaintext
+        case .ciphertext:
+            return CoreCryptoSwift.MlsWirePolicy.ciphertext
+        }
+    }
+}
+
+/// Implementation specific configuration object for a conversation
+public struct CustomConfiguration: ConvertToInner {
+    typealias Inner = CoreCryptoSwift.CustomConfiguration
+    func convert() -> Inner {
+        return CoreCryptoSwift.CustomConfiguration(keyRotationSpan: self.keyRotationSpan, wirePolicy: self.wirePolicy?.convert())
+    }
+
     /// Duration in seconds after which we will automatically force a self_update commit
     /// Note: This isn't currently implemented
     public var keyRotationSpan: TimeInterval?
-    /// List of client IDs that are allowed to be external senders of commits
-    public var externalSenders: [[UInt8]]
+    /// Defines if handshake messages are encrypted or not
+    /// Note: Ciphertext is not currently supported by wire-server
+    public var wirePolicy: WirePolicy?
 
-    public init(admins: [ClientId], ciphersuite: CiphersuiteName?, keyRotationSpan: TimeInterval?, externalSenders: [[UInt8]]) {
-        self.admins = admins
-        self.ciphersuite = ciphersuite
+    public init(keyRotationSpan: TimeInterval?, wirePolicy: WirePolicy?) {
         self.keyRotationSpan = keyRotationSpan
-        self.externalSenders = externalSenders
+        self.wirePolicy = wirePolicy
     }
 }
 
@@ -364,7 +399,7 @@ public class CoreCryptoWrapper {
     /// 2. ``clientId`` should stay consistent as it will be verified against the stored signature & identity to validate the persisted credential
     /// 3. ``key`` should be appropriately stored in a secure location (i.e. WebCrypto private key storage)
     ///
-    public init(path: String, key: String, clientId: String, entropySeed: [UInt8]?) throws {
+    public init(path: String, key: String, clientId: ClientId, entropySeed: [UInt8]?) throws {
         self.coreCrypto = try CoreCrypto(path: path, key: key, clientId: clientId, entropySeed: entropySeed)
     }
 
@@ -378,8 +413,17 @@ public class CoreCryptoWrapper {
     /// Use this after ```CoreCrypto/deferredInit``` when you have a clientId. It initializes MLS.
     ///
     /// - parameter clientId: client identifier
-    public func mlsInit(clientId: String) throws {
+    public func mlsInit(clientId: ClientId) throws {
         try self.coreCrypto.mlsInit(clientId: clientId)
+    }
+
+    /// `CoreCrypto` is supposed to be a singleton. Knowing that, it does some optimizations by
+    /// keeping MLS groups in memory. Sometimes, especially on iOS, it is required to use extensions
+    /// to perform tasks in the background. Extensions are executed in another process so another
+    /// `CoreCrypto` instance has to be used. This method has to be used to synchronize instances.
+    /// It simply fetches the MLS group from keystore in memory.
+    public func restoreFromDisk() throws {
+        return try self.coreCrypto.restoreFromDisk()
     }
 
     /// Sets the callback interface, required by some operations from `CoreCrypto`
@@ -430,9 +474,10 @@ public class CoreCryptoWrapper {
 
     /// Ingest a TLS-serialized MLS welcome message to join a an existing MLS group
     /// - parameter welcomeMessage: - TLS-serialized MLS Welcome message
+    /// - parameter config: - configuration of the MLS group
     /// - returns: The conversation ID of the newly joined group. You can use the same ID to decrypt/encrypt messages
-    public func processWelcomeMessage(welcomeMessage: [UInt8]) throws -> ConversationId {
-        return try self.coreCrypto.processWelcomeMessage(welcomeMessage: welcomeMessage)
+    public func processWelcomeMessage(welcomeMessage: [UInt8], configuration: CustomConfiguration) throws -> ConversationId {
+        return try self.coreCrypto.processWelcomeMessage(welcomeMessage: welcomeMessage, customConfiguration: configuration.convert())
     }
 
     /// Adds new clients to a conversation, assuming the current client has the right to add new clients to the conversation
@@ -588,9 +633,10 @@ public class CoreCryptoWrapper {
     /// bad can happen if you forget to except some storage space wasted.
     ///
     /// - parameter publicGroupState: a TLS encoded `PublicGroupState` fetched from the Delivery Service
+    /// - parameter config: - configuration of the MLS group
     /// - returns: an object of type `ConversationInitBundle`
-    public func joinByExternalCommit(publicGroupState: [UInt8]) throws -> ConversationInitBundle {
-        try self.coreCrypto.joinByExternalCommit(publicGroupState: publicGroupState).convertTo()
+    public func joinByExternalCommit(publicGroupState: [UInt8], configuration: CustomConfiguration) throws -> ConversationInitBundle {
+        try self.coreCrypto.joinByExternalCommit(publicGroupState: publicGroupState, customConfiguration: configuration.convert()).convertTo()
     }
 
     /// Exports a TLS-serialized view of the current group state corresponding to the provided conversation ID.
@@ -605,9 +651,8 @@ public class CoreCryptoWrapper {
     /// deletes the temporary one. After merging, the group should be fully functional.
     ///
     /// - parameter conversationId: conversation identifier
-    /// - parameter config: the configuration to be applied by the new group on this client
-    public func mergePendingGroupFromExternalCommit(conversationId: ConversationId, config: ConversationConfiguration) throws {
-        try self.coreCrypto.mergePendingGroupFromExternalCommit(conversationId: conversationId, config: config.convert())
+    public func mergePendingGroupFromExternalCommit(conversationId: ConversationId) throws {
+        try self.coreCrypto.mergePendingGroupFromExternalCommit(conversationId: conversationId)
     }
 
     /// In case the external commit generated by ``CoreCryptoWrapper/joinByExternalCommit`` is rejected by the Delivery Service,
@@ -776,6 +821,7 @@ public class CoreCryptoWrapper {
 
     /// Proteus session local fingerprint
     ///
+    /// - parameter sessionId: ID of the Proteus session
     /// - returns: Hex-encoded public key string
     public func proteusFingerprintLocal(sessionId: String) throws -> String {
         try self.coreCrypto.proteusFingerprintLocal(sessionId: sessionId)
@@ -783,11 +829,19 @@ public class CoreCryptoWrapper {
 
     /// Proteus session remote fingerprint
     ///
+    /// - parameter sessionId: ID of the Proteus session
     /// - returns: Hex-encoded public key string
     public func proteusFingerprintRemote(sessionId: String) throws -> String {
         try self.coreCrypto.proteusFingerprintRemote(sessionId: sessionId)
     }
 
+    /// Hex-encoded fingerprint of the given prekey
+    ///
+    /// - parameter prekey: the prekey bundle to get the fingerprint from
+    /// - returns: Hex-encoded public key string
+    public func proteusFingerprintPrekeybundle(prekey: [UInt8]) throws -> String {
+        try self.coreCrypto.proteusFingerprintPrekeybundle(prekey: prekey)
+    }
 
      /// Imports all the data stored by Cryptobox into the CoreCrypto keystore
      ///
